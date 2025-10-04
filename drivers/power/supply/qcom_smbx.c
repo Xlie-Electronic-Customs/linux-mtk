@@ -134,6 +134,9 @@
 #define OCP_CHARGER_BIT					BIT(1)
 #define SDP_CHARGER_BIT					BIT(0)
 
+#define USBIN_CMD_IL					0x340
+#define USBIN_SUSPEND_BIT				BIT(0)
+
 #define TYPE_C_STATUS_1					0x30B
 #define UFP_TYPEC_MASK					GENMASK(7, 5)
 #define UFP_TYPEC_RDSTD_BIT				BIT(7)
@@ -584,7 +587,7 @@ static void smb_status_change_work(struct work_struct *work)
 		current_ua = CDP_CURRENT_UA;
 		break;
 	case POWER_SUPPLY_USB_TYPE_DCP:
-		current_ua = DCP_CURRENT_UA;
+		current_ua = chip->batt_info->constant_charge_current_max_ua;
 		break;
 	case POWER_SUPPLY_USB_TYPE_SDP:
 	default:
@@ -693,6 +696,9 @@ static int smb_set_property(struct power_supply *psy,
 	struct smb_chip *chip = power_supply_get_drvdata(psy);
 
 	switch (psp) {
+	case POWER_SUPPLY_PROP_STATUS:
+		return regmap_update_bits(chip->regmap, chip->base + USBIN_CMD_IL,
+				USBIN_SUSPEND_BIT, !val->intval);
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 		return smb_set_current_limit(chip, val->intval);
 	default:
@@ -705,6 +711,7 @@ static int smb_property_is_writable(struct power_supply *psy,
 				     enum power_supply_property psp)
 {
 	switch (psp) {
+	case POWER_SUPPLY_PROP_STATUS:
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 		return 1;
 	default:
@@ -986,7 +993,9 @@ static int smb_probe(struct platform_device *pdev)
 	if (rc)
 		return dev_err_probe(chip->dev, rc,
 				     "Failed to get battery info\n");
-
+	if (chip->batt_info->constant_charge_current_max_ua == -EINVAL)
+		chip->batt_info->constant_charge_current_max_ua = DCP_CURRENT_UA;
+	
 	rc = devm_delayed_work_autocancel(chip->dev, &chip->status_change_work,
 					  smb_status_change_work);
 	if (rc)
@@ -1016,6 +1025,9 @@ static int smb_probe(struct platform_device *pdev)
 	if (rc < 0)
 		return rc;
 
+	if (rc < 0)
+		return dev_err_probe(chip->dev, rc,
+				     "Couldn't write fast charge current cfg");
 	devm_device_init_wakeup(chip->dev);
 
 	rc = devm_pm_set_wake_irq(chip->dev, chip->cable_irq);
@@ -1023,6 +1035,17 @@ static int smb_probe(struct platform_device *pdev)
 		return dev_err_probe(chip->dev, rc, "Couldn't set wake irq\n");
 
 	platform_set_drvdata(pdev, chip);
+
+	/*
+	 * This overrides all of the other current limits and is expected
+	 * to be used for setting limits based on temperature. We set some
+	 * relatively safe default value while still allowing a comfortably
+	 * fast charging rate. Once temperature monitoring is hooked up we
+	 * would expect this to be changed dynamically based on temperature
+	 * reporting.
+	 */
+	rc = regmap_write(chip->regmap, chip->base + FAST_CHARGE_CURRENT_CFG,
+			  1950000 / CURRENT_SCALE_FACTOR);
 
 	/* Initialise charger state */
 	schedule_delayed_work(&chip->status_change_work, 0);
