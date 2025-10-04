@@ -1175,6 +1175,56 @@ int adreno_read_speedbin(struct device *dev, u32 *speedbin)
 	return nvmem_cell_read_variable_le_u32(dev, "speed_bin", speedbin);
 }
 
+static u32 fuse_to_supp_hw(const struct adreno_info *info, u32 fuse)
+{
+	if (!info->speedbins)
+		return UINT_MAX;
+
+	for (int i = 0; info->speedbins[i].fuse != SHRT_MAX; i++)
+		if (info->speedbins[i].fuse == fuse)
+			return BIT(info->speedbins[i].speedbin);
+
+	return UINT_MAX;
+}
+
+static int adreno_set_supported_hw(struct device *dev, const struct adreno_info *info)
+{
+	u32 supp_hw;
+	u32 speedbin;
+	int ret;
+
+	ret = adreno_read_speedbin(dev, &speedbin);
+	/*
+	 * -ENOENT means that the platform doesn't support speedbin which is
+	 * fine
+	 */
+	if (ret == -ENOENT) {
+		return 0;
+	} else if (ret) {
+		dev_err_probe(dev, ret,
+			      "failed to read speed-bin. Some OPPs may not be supported by hardware\n");
+		return ret;
+	}
+
+	supp_hw = fuse_to_supp_hw(info, speedbin);
+	dev_info(dev, "GPU speedbin fuse %d (0x%x), mapped to opp-supp-hw 0x%x\n",
+		 speedbin, speedbin, supp_hw);
+
+	if (supp_hw == UINT_MAX) {
+		DRM_DEV_ERROR(dev,
+			      "missing support for speed-bin: %u. Some OPPs may not be supported by hardware\n",
+		speedbin);
+		supp_hw = BIT(0); /* Default */
+	}
+
+	ret = devm_pm_opp_set_supported_hw(dev, &supp_hw, 1);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+
 int adreno_gpu_init(struct drm_device *drm, struct platform_device *pdev,
 		struct adreno_gpu *adreno_gpu,
 		const struct adreno_gpu_funcs *funcs, int nr_rings)
