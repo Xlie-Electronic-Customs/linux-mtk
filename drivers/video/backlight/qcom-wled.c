@@ -294,7 +294,9 @@ static void wled_ovp_work(struct work_struct *work)
 {
 	struct wled *wled = container_of(work,
 					 struct wled, ovp_work.work);
-	enable_irq(wled->ovp_irq);
+	if (irqd_irq_disabled(irq_get_irq_data(wled->ovp_irq)))
+    		enable_irq(wled->ovp_irq);
+
 }
 
 static int wled_module_enable(struct wled *wled, int val)
