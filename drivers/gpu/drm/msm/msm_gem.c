@@ -73,14 +73,14 @@ static void msm_gem_close(struct drm_gem_object *obj, struct drm_file *file)
 
 	/*
 	 * TODO we might need to kick this to a queue to avoid blocking
-	 * in CLOSE ioctl
+	 * in CLOSE ioctl 
 	 */
-	dma_resv_wait_timeout(obj->resv, DMA_RESV_USAGE_BOOKKEEP, false,
-			      MAX_SCHEDULE_TIMEOUT);
+	// dma_resv_wait_timeout(obj->resv, DMA_RESV_USAGE_BOOKKEEP, false,
+	// 		      MAX_SCHEDULE_TIMEOUT);
 
-	msm_gem_lock_vm_and_obj(&exec, obj, ctx->vm);
-	put_iova_spaces(obj, ctx->vm, true, "close");
-	drm_exec_fini(&exec);     /* drop locks */
+	// msm_gem_lock_vm_and_obj(&exec, obj, ctx->vm);
+	// put_iova_spaces(obj, ctx->vm, true, "close");
+	// drm_exec_fini(&exec);     /* drop locks */
 }
 
 /*
