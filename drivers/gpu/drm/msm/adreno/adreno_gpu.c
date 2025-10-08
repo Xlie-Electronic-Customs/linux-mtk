@@ -1187,7 +1187,7 @@ static u32 fuse_to_supp_hw(const struct adreno_info *info, u32 fuse)
 	return UINT_MAX;
 }
 
-static int adreno_set_supported_hw(struct device *dev, const struct adreno_info *info)
+int adreno_set_supported_hw(struct device *dev, const struct adreno_info *info)
 {
 	u32 supp_hw;
 	u32 speedbin;
