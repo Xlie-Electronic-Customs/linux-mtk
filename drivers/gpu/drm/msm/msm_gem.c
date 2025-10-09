@@ -50,7 +50,6 @@ static void put_iova_spaces(struct drm_gem_object *obj, struct drm_gpuvm *vm,
 static void msm_gem_close(struct drm_gem_object *obj, struct drm_file *file)
 {
 	struct msm_context *ctx = file->driver_priv;
-	struct drm_exec exec;
 
 	update_ctx_mem(file, -obj->size);
 	msm_gem_vma_put(obj);
@@ -70,17 +69,6 @@ static void msm_gem_close(struct drm_gem_object *obj, struct drm_file *file)
 	 */
 	if (msm_context_is_vmbind(ctx))
 		return;
-
-	/*
-	 * TODO we might need to kick this to a queue to avoid blocking
-	 * in CLOSE ioctl 
-	 */
-	// dma_resv_wait_timeout(obj->resv, DMA_RESV_USAGE_BOOKKEEP, false,
-	// 		      MAX_SCHEDULE_TIMEOUT);
-
-	// msm_gem_lock_vm_and_obj(&exec, obj, ctx->vm);
-	// put_iova_spaces(obj, ctx->vm, true, "close");
-	// drm_exec_fini(&exec);     /* drop locks */
 }
 
 /*
