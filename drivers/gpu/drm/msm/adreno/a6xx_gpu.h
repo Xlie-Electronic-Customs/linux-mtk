@@ -8,6 +8,7 @@
 #include "adreno_gpu.h"
 #include "a6xx_enums.xml.h"
 #include "a7xx_enums.xml.h"
+#include "a8xx_enums.xml.h"
 #include "a6xx_perfcntrs.xml.h"
 #include "a7xx_perfcntrs.xml.h"
 #include "a6xx.xml.h"
@@ -46,6 +47,8 @@ struct a6xx_info {
 	const struct adreno_protect *protect;
 	const struct adreno_reglist_list *pwrup_reglist;
 	const struct adreno_reglist_list *ifpc_reglist;
+	const struct adreno_reglist *gbif_cx;
+	const struct adreno_reglist_pipe *nonctxt_reglist;
 	u32 gmu_chipid;
 	u32 gmu_cgc_mode;
 	u32 prim_fifo_threshold;
@@ -57,6 +60,8 @@ struct a6xx_gpu {
 
 	struct drm_gem_object *sqe_bo;
 	uint64_t sqe_iova;
+	struct drm_gem_object *aqe_bo;
+	uint64_t aqe_iova;
 
 	struct msm_ringbuffer *cur_ring;
 	struct msm_ringbuffer *next_ring;
@@ -101,6 +106,11 @@ struct a6xx_gpu {
 	void *htw_llc_slice;
 	bool have_mmu500;
 	bool hung;
+
+	u32 cached_aperture;
+	spinlock_t aperture_lock;
+
+	u32 slice_mask;
 };
 
 #define to_a6xx_gpu(x) container_of(x, struct a6xx_gpu, base)
@@ -299,4 +309,25 @@ void a6xx_bus_clear_pending_transactions(struct adreno_gpu *adreno_gpu, bool gx_
 void a6xx_gpu_sw_reset(struct msm_gpu *gpu, bool assert);
 int a6xx_fenced_write(struct a6xx_gpu *gpu, u32 offset, u64 value, u32 mask, bool is_64b);
 
+void a7xx_patch_pwrup_reglist(struct msm_gpu *gpu);
+int a7xx_preempt_start(struct msm_gpu *gpu);
+int a7xx_cp_init(struct msm_gpu *gpu);
+
+void a8xx_aperture_set(struct msm_gpu *gpu, enum adreno_pipe pipe);
+void a8xx_bus_clear_pending_transactions(struct adreno_gpu *adreno_gpu, bool gx_off);
+int a8xx_fault_handler(void *arg, unsigned long iova, int flags, void *data);
+void a8xx_flush(struct msm_gpu *gpu, struct msm_ringbuffer *ring);
+int a8xx_gmu_get_timestamp(struct msm_gpu *gpu, uint64_t *value);
+u64 a8xx_gpu_busy(struct msm_gpu *gpu, unsigned long *out_sample_rate);
+int a8xx_gpu_feature_probe(struct msm_gpu *gpu);
+int a8xx_hw_init(struct msm_gpu *gpu);
+irqreturn_t a8xx_irq(struct msm_gpu *gpu);
+void a8xx_llc_activate(struct a6xx_gpu *a6xx_gpu);
+bool a8xx_progress(struct msm_gpu *gpu, struct msm_ringbuffer *ring);
+void a8xx_recover(struct msm_gpu *gpu);
+
+void a8xx_show(struct msm_gpu *gpu, struct msm_gpu_state *state,
+		struct drm_printer *p);
+struct msm_gpu_state *a8xx_gpu_state_get(struct msm_gpu *gpu);
+int a8xx_gpu_state_put(struct msm_gpu_state *state);
 #endif /* __A6XX_GPU_H__ */

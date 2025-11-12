@@ -19,6 +19,16 @@ menuconfig COMMON_CLK_QCOM
 
 if COMMON_CLK_QCOM
 
+config CLK_KAANAPALI_CAMCC
+	tristate "KAANAPALI Camera Clock Controller"
+	depends on ARM64 || COMPILE_TEST
+	select CLK_KAANAPALI_GCC
+	help
+	  Support for the camera clock controller on Qualcomm Technologies, Inc
+	  Kaanapali devices.
+	  Say Y if you want to support camera devices and functionality such as
+	  capturing pictures.
+
 config CLK_GLYMUR_DISPCC
 	tristate "GLYMUR Display Clock Controller"
 	depends on ARM64 || COMPILE_TEST
@@ -45,6 +55,43 @@ config CLK_GLYMUR_TCSRCC
 	help
 	  Support for the TCSR clock controller on GLYMUR devices.
 	  Say Y if you want to use peripheral devices such as USB/PCIe/EDP.
+
+config CLK_KAANAPALI_DISPCC
+	tristate "KAANAPALI Display Clock Controller"
+	depends on ARM64 || COMPILE_TEST
+	select CLK_KAANAPALI_GCC
+	help
+	  Support for the display clock controller on Qualcomm Technologies, Inc
+	  Kaanapali devices.
+	  Say Y if you want to support display devices and functionality such as
+	  splash screen.
+
+config CLK_KAANAPALI_GPUCC
+	tristate "KAANAPALI Graphics Clock Controller"
+	depends on ARM64 || COMPILE_TEST
+	select CLK_KAANAPALI_GCC
+	help
+	  Support for the graphics clock controller on KAANAPALI devices.
+	  Say Y if you want to support graphics controller devices and
+	  functionality such as 3D graphics.
+
+config CLK_KAANAPALI_VIDEOCC
+	tristate "KAANAPALI Video Clock Controller"
+	depends on ARM64 || COMPILE_TEST
+	select CLK_KAANAPALI_GCC
+	help
+	  Support for the video clock controller on Kaanapali devices.
+	  Say Y if you want to support video devices and functionality such as
+	  video encode/decode.
+
+config CLK_KAANAPALI_GCC
+	tristate "KAANAPALI Global Clock Controller"
+	depends on ARM64 || COMPILE_TEST
+	select QCOM_GDSC
+	help
+	  Support for the global clock controller on Kaanapali devices.
+	  Say Y if you want to use peripheral devices such as UART,
+	  SPI, I2C, USB, SD/UFS, PCIe etc.
 
 config CLK_X1E80100_CAMCC
 	tristate "X1E80100 Camera Clock Controller"
@@ -1513,6 +1560,17 @@ config SM_VIDEOCC_8550
 	help
 	  Support for the video clock controller on Qualcomm Technologies, Inc.
 	  SM8550 or SM8650 or X1E80100 devices.
+	  Say Y if you want to support video devices and functionality such as
+	  video encode/decode.
+
+config SM_VIDEOCC_8750
+	tristate "SM8750 Video Clock Controller"
+	depends on ARM64 || COMPILE_TEST
+	select SM_GCC_8750
+	select QCOM_GDSC
+	help
+	  Support for the video clock controller on Qualcomm Technologies, Inc.
+	  SM8750 devices.
 	  Say Y if you want to support video devices and functionality such as
 	  video encode/decode.
 

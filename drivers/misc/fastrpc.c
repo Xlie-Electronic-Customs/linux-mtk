@@ -33,7 +33,6 @@
 #define FASTRPC_ALIGN		128
 #define FASTRPC_MAX_FDLIST	16
 #define FASTRPC_MAX_CRCLIST	64
-#define FASTRPC_PHYS(p)	((p) & 0xffffffff)
 #define FASTRPC_CTX_MAX (256)
 #define FASTRPC_INIT_HANDLE	1
 #define FASTRPC_DSP_UTILITIES_HANDLE	2
@@ -104,6 +103,26 @@
 #define SENSORS_PD	(2)
 
 #define miscdev_to_fdevice(d) container_of(d, struct fastrpc_device, miscdev)
+
+/*
+ * By default, the sid will be prepended adjacent to smmu pa before sending
+ * to DSP. But if the compatible Soc found at root node specifies the new
+ * addressing format to handle pa's of longer widths, then the sid will be
+ * prepended at the position specified in this macro.
+ */
+#define SID_POS_IN_IOVA 56
+
+/* Default width of pa bus from dsp */
+#define DSP_DEFAULT_BUS_WIDTH 32
+
+/* Extract smmu pa from consolidated iova */
+#define IOVA_TO_PHYS(iova, sid_pos) (iova & ((1ULL << sid_pos) - 1ULL))
+
+/*
+ * Prepare the consolidated iova to send to dsp by prepending the sid
+ * to smmu pa at the appropriate position
+ */
+#define IOVA_FROM_SID_PA(sid, phys, sid_pos) (phys += sid << sid_pos)
 
 struct fastrpc_phy_page {
 	u64 addr;		/* physical address */
@@ -255,6 +274,8 @@ struct fastrpc_session_ctx {
 	int sid;
 	bool used;
 	bool valid;
+	u32 sid_pos;
+	u32 pa_bits;
 };
 
 struct fastrpc_channel_ctx {
@@ -278,6 +299,7 @@ struct fastrpc_channel_ctx {
 	bool secure;
 	bool unsigned_support;
 	u64 dma_mask;
+	u32 iova_format;
 };
 
 struct fastrpc_device {
@@ -320,11 +342,11 @@ static void fastrpc_free_map(struct kref *ref)
 
 			perm.vmid = QCOM_SCM_VMID_HLOS;
 			perm.perm = QCOM_SCM_PERM_RWX;
-			err = qcom_scm_assign_mem(map->phys, map->len,
+			err = qcom_scm_assign_mem(map->phys, map->size,
 				&src_perms, &perm, 1);
 			if (err) {
 				dev_err(map->fl->sctx->dev, "Failed to assign memory phys 0x%llx size 0x%llx err %d\n",
-						map->phys, map->len, err);
+						map->phys, map->size, err);
 				return;
 			}
 		}
@@ -360,20 +382,25 @@ static int fastrpc_map_get(struct fastrpc_map *map)
 
 
 static int fastrpc_map_lookup(struct fastrpc_user *fl, int fd,
-			    struct fastrpc_map **ppmap)
+			    struct fastrpc_map **ppmap, bool take_ref)
 {
+	struct fastrpc_session_ctx *sess = fl->sctx;
 	struct fastrpc_map *map = NULL;
-	struct dma_buf *buf;
 	int ret = -ENOENT;
-
-	buf = dma_buf_get(fd);
-	if (IS_ERR(buf))
-		return PTR_ERR(buf);
 
 	spin_lock(&fl->lock);
 	list_for_each_entry(map, &fl->maps, node) {
-		if (map->fd != fd || map->buf != buf)
+		if (map->fd != fd)
 			continue;
+
+		if (take_ref) {
+			ret = fastrpc_map_get(map);
+			if (ret) {
+				dev_dbg(sess->dev, "%s: Failed to get map fd=%d ret=%d\n",
+					__func__, fd, ret);
+				break;
+			}
+		}
 
 		*ppmap = map;
 		ret = 0;
@@ -381,15 +408,16 @@ static int fastrpc_map_lookup(struct fastrpc_user *fl, int fd,
 	}
 	spin_unlock(&fl->lock);
 
-	dma_buf_put(buf);
-
 	return ret;
 }
 
 static void fastrpc_buf_free(struct fastrpc_buf *buf)
 {
+	uint32_t sid_pos = (buf->fl->sctx ? buf->fl->sctx->sid_pos :
+					    DSP_DEFAULT_BUS_WIDTH);
+
 	dma_free_coherent(buf->dev, buf->size, buf->virt,
-			  FASTRPC_PHYS(buf->phys));
+			  IOVA_TO_PHYS(buf->phys, sid_pos));
 	kfree(buf);
 }
 
@@ -439,7 +467,7 @@ static int fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
 	buf = *obuf;
 
 	if (fl->sctx && fl->sctx->sid)
-		buf->phys += ((u64)fl->sctx->sid << 32);
+		IOVA_FROM_SID_PA((u64)fl->sctx->sid, buf->phys, fl->sctx->sid_pos);
 
 	return 0;
 }
@@ -684,7 +712,8 @@ static int fastrpc_dma_buf_attach(struct dma_buf *dmabuf,
 		return -ENOMEM;
 
 	ret = dma_get_sgtable(buffer->dev, &a->sgt, buffer->virt,
-			      FASTRPC_PHYS(buffer->phys), buffer->size);
+			      IOVA_TO_PHYS(buffer->phys, buffer->fl->sctx->sid_pos),
+			      buffer->size);
 	if (ret < 0) {
 		dev_err(buffer->dev, "failed to get scatterlist from DMA API\n");
 		kfree(a);
@@ -733,7 +762,7 @@ static int fastrpc_mmap(struct dma_buf *dmabuf,
 	dma_resv_assert_held(dmabuf->resv);
 
 	return dma_mmap_coherent(buf->dev, vma, buf->virt,
-				 FASTRPC_PHYS(buf->phys), size);
+				 IOVA_TO_PHYS(buf->phys, buf->fl->sctx->sid_pos), size);
 }
 
 static const struct dma_buf_ops fastrpc_dma_buf_ops = {
@@ -746,14 +775,16 @@ static const struct dma_buf_ops fastrpc_dma_buf_ops = {
 	.release = fastrpc_release,
 };
 
-static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
+static int fastrpc_map_create(struct fastrpc_user *fl, int fd,
 			      u64 len, u32 attr, struct fastrpc_map **ppmap)
 {
 	struct fastrpc_session_ctx *sess = fl->sctx;
 	struct fastrpc_map *map = NULL;
 	struct sg_table *table;
-	struct scatterlist *sgl = NULL;
-	int err = 0, sgl_index = 0;
+	int err = 0;
+
+	if (!fastrpc_map_lookup(fl, fd, ppmap, true))
+		return 0;
 
 	map = kzalloc(sizeof(*map), GFP_KERNEL);
 	if (!map)
@@ -788,17 +819,10 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 		map->phys = sg_phys(map->table->sgl);
 	} else {
 		map->phys = sg_dma_address(map->table->sgl);
-		map->phys += ((u64)fl->sctx->sid << 32);
+		IOVA_FROM_SID_PA((u64)fl->sctx->sid, map->phys,
+				 fl->sctx->sid_pos);
 	}
-	for_each_sg(map->table->sgl, sgl, map->table->nents,
-		sgl_index)
-		map->size += sg_dma_len(sgl);
-	if (len > map->size) {
-		dev_dbg(sess->dev, "Bad size passed len 0x%llx map size 0x%llx\n",
-				len, map->size);
-		err = -EINVAL;
-		goto map_err;
-	}
+	map->size = len;
 	map->va = sg_virt(map->table->sgl);
 	map->len = len;
 
@@ -815,10 +839,10 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 		dst_perms[1].vmid = fl->cctx->vmperms[0].vmid;
 		dst_perms[1].perm = QCOM_SCM_PERM_RWX;
 		map->attr = attr;
-		err = qcom_scm_assign_mem(map->phys, (u64)map->len, &src_perms, dst_perms, 2);
+		err = qcom_scm_assign_mem(map->phys, (u64)map->size, &src_perms, dst_perms, 2);
 		if (err) {
 			dev_err(sess->dev, "Failed to assign memory with phys 0x%llx size 0x%llx err %d\n",
-					map->phys, map->len, err);
+					map->phys, map->size, err);
 			goto map_err;
 		}
 	}
@@ -835,24 +859,6 @@ attach_err:
 	dma_buf_put(map->buf);
 get_err:
 	fastrpc_map_put(map);
-
-	return err;
-}
-
-static int fastrpc_map_create(struct fastrpc_user *fl, int fd,
-			      u64 len, u32 attr, struct fastrpc_map **ppmap)
-{
-	struct fastrpc_session_ctx *sess = fl->sctx;
-	int err = 0;
-
-	if (!fastrpc_map_lookup(fl, fd, ppmap)) {
-		if (!fastrpc_map_get(*ppmap))
-			return 0;
-		dev_dbg(sess->dev, "%s: Failed to get map fd=%d\n",
-			__func__, fd);
-	}
-
-	err = fastrpc_map_attach(fl, fd, len, attr, ppmap);
 
 	return err;
 }
@@ -929,12 +935,8 @@ static int fastrpc_create_maps(struct fastrpc_invoke_ctx *ctx)
 		    ctx->args[i].length == 0)
 			continue;
 
-		if (i < ctx->nbufs)
-			err = fastrpc_map_create(ctx->fl, ctx->args[i].fd,
-				 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i]);
-		else
-			err = fastrpc_map_attach(ctx->fl, ctx->args[i].fd,
-				 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i]);
+		err = fastrpc_map_create(ctx->fl, ctx->args[i].fd,
+			 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i]);
 		if (err) {
 			dev_err(dev, "Error Creating map %d\n", err);
 			return -EINVAL;
@@ -1093,7 +1095,6 @@ static int fastrpc_put_args(struct fastrpc_invoke_ctx *ctx,
 	struct fastrpc_phy_page *pages;
 	u64 *fdlist;
 	int i, inbufs, outbufs, handles;
-	int ret = 0;
 
 	inbufs = REMOTE_SCALARS_INBUFS(ctx->sc);
 	outbufs = REMOTE_SCALARS_OUTBUFS(ctx->sc);
@@ -1109,26 +1110,23 @@ static int fastrpc_put_args(struct fastrpc_invoke_ctx *ctx,
 			u64 len = rpra[i].buf.len;
 
 			if (!kernel) {
-				if (copy_to_user((void __user *)dst, src, len)) {
-					ret = -EFAULT;
-					goto cleanup_fdlist;
-				}
+				if (copy_to_user((void __user *)dst, src, len))
+					return -EFAULT;
 			} else {
 				memcpy(dst, src, len);
 			}
 		}
 	}
 
-cleanup_fdlist:
 	/* Clean up fdlist which is updated by DSP */
 	for (i = 0; i < FASTRPC_MAX_FDLIST; i++) {
 		if (!fdlist[i])
 			break;
-		if (!fastrpc_map_lookup(fl, (int)fdlist[i], &mmap))
+		if (!fastrpc_map_lookup(fl, (int)fdlist[i], &mmap, false))
 			fastrpc_map_put(mmap);
 	}
 
-	return ret;
+	return 0;
 }
 
 static int fastrpc_invoke_send(struct fastrpc_session_ctx *sctx,
@@ -2060,7 +2058,7 @@ static int fastrpc_req_mem_map(struct fastrpc_user *fl, char __user *argp)
 	args[0].length = sizeof(req_msg);
 
 	pages.addr = map->phys;
-	pages.size = map->len;
+	pages.size = map->size;
 
 	args[1].ptr = (u64) (uintptr_t) &pages;
 	args[1].length = sizeof(pages);
@@ -2075,7 +2073,7 @@ static int fastrpc_req_mem_map(struct fastrpc_user *fl, char __user *argp)
 	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE, sc, &args[0]);
 	if (err) {
 		dev_err(dev, "mem mmap error, fd %d, vaddr %llx, size %lld\n",
-			req.fd, req.vaddrin, map->len);
+			req.fd, req.vaddrin, map->size);
 		goto err_invoke;
 	}
 
@@ -2088,7 +2086,7 @@ static int fastrpc_req_mem_map(struct fastrpc_user *fl, char __user *argp)
 	if (copy_to_user((void __user *)argp, &req, sizeof(req))) {
 		/* unmap the memory and release the buffer */
 		req_unmap.vaddr = (uintptr_t) rsp_msg.vaddr;
-		req_unmap.length = map->len;
+		req_unmap.length = map->size;
 		fastrpc_req_mem_unmap_impl(fl, &req_unmap);
 		return -EFAULT;
 	}
@@ -2182,11 +2180,14 @@ static int fastrpc_cb_probe(struct platform_device *pdev)
 	sess->used = false;
 	sess->valid = true;
 	sess->dev = dev;
-	dev_set_drvdata(dev, sess);
+	sess->pa_bits = cctx->dma_mask;
+	/* Configure where sid will be prepended to pa */
+	sess->sid_pos = (cctx->iova_format ? SID_POS_IN_IOVA : sess->pa_bits);
 
 	if (of_property_read_u32(dev->of_node, "reg", &sess->sid))
 		dev_info(dev, "FastRPC Session ID not specified in DT\n");
 
+	dev_set_drvdata(dev, sess);
 	if (sessions > 0) {
 		struct fastrpc_session_ctx *dup_sess;
 
@@ -2198,9 +2199,9 @@ static int fastrpc_cb_probe(struct platform_device *pdev)
 		}
 	}
 	spin_unlock_irqrestore(&cctx->lock, flags);
-	rc = dma_set_mask(dev, DMA_BIT_MASK(32));
+	rc = dma_set_mask(dev, DMA_BIT_MASK(sess->pa_bits));
 	if (rc) {
-		dev_err(dev, "32-bit DMA enable failed\n");
+		dev_err(dev, "%u-bit DMA enable failed\n", sess->pa_bits);
 		return rc;
 	}
 
@@ -2285,6 +2286,21 @@ static int fastrpc_get_domain_id(const char *domain)
 	return -EINVAL;
 }
 
+struct fastrpc_soc_data {
+	u32 dsp_iova_format;
+	u32 cdsp_dma_mask;
+};
+
+static const struct fastrpc_soc_data kaanapali_soc_data = {
+	.dsp_iova_format = 1,
+	.cdsp_dma_mask = 34,
+};
+
+static const struct of_device_id qcom_soc_match_table[] = {
+	{ .compatible = "qcom,kaanapali", .data = &kaanapali_soc_data },
+	{},
+};
+
 static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 {
 	struct device *rdev = &rpdev->dev;
@@ -2293,6 +2309,25 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 	const char *domain;
 	bool secure_dsp;
 	unsigned int vmids[FASTRPC_MAX_VMIDS];
+	struct device_node *root;
+	const struct of_device_id *match;
+	const struct fastrpc_soc_data *soc_data = NULL;
+	u32 iova_format = 0;
+	u32 ubs = DSP_DEFAULT_BUS_WIDTH;
+
+	root = of_find_node_by_path("/");
+	if (!root)
+		return -ENODEV;
+
+	match = of_match_node(qcom_soc_match_table, root);
+	of_node_put(root);
+	if (!match || !match->data) {
+		dev_dbg(rdev, "no compatible SoC found at root node\n");
+	} else {
+		soc_data = match->data;
+		iova_format = soc_data->dsp_iova_format;
+		ubs = soc_data->cdsp_dma_mask;
+	}
 
 	err = of_property_read_string(rdev->of_node, "label", &domain);
 	if (err) {
@@ -2372,7 +2407,9 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 		err = -EINVAL;
 		goto err_free_data;
 	}
-
+	/* determine where sid needs to be prepended to pa based on iova_format */
+	data->iova_format = iova_format;
+	data->dma_mask = (domain_id == CDSP_DOMAIN_ID ? ubs : DSP_DEFAULT_BUS_WIDTH);
 	kref_init(&data->refcount);
 
 	dev_set_drvdata(&rpdev->dev, data);

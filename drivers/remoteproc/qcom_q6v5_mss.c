@@ -498,8 +498,6 @@ static void q6v5_debug_policy_load(struct q6v5 *qproc, void *mba_region)
 	release_firmware(dp_fw);
 }
 
-#define MSM8974_B00_OFFSET 0x1000
-
 static int q6v5_load(struct rproc *rproc, const struct firmware *fw)
 {
 	struct q6v5 *qproc = rproc->priv;
@@ -518,14 +516,7 @@ static int q6v5_load(struct rproc *rproc, const struct firmware *fw)
 		return -EBUSY;
 	}
 
-	if ((qproc->version == MSS_MSM8974 ||
-	     qproc->version == MSS_MSM8226 ||
-	     qproc->version == MSS_MSM8926) &&
-	    fw->size > MSM8974_B00_OFFSET &&
-	    !memcmp(fw->data, ELFMAG, SELFMAG))
-		memcpy(mba_region, fw->data + MSM8974_B00_OFFSET, fw->size - MSM8974_B00_OFFSET);
-	else
-		memcpy(mba_region, fw->data, fw->size);
+	memcpy(mba_region, fw->data, fw->size);
 	q6v5_debug_policy_load(qproc, mba_region);
 	memunmap(mba_region);
 
@@ -2165,7 +2156,7 @@ static int q6v5_probe(struct platform_device *pdev)
 	qproc->has_mba_logs = desc->has_mba_logs;
 
 	ret = qcom_q6v5_init(&qproc->q6v5, pdev, rproc, MPSS_CRASH_REASON_SMEM, "modem",
-			     qcom_msa_handover);
+			     false, qcom_msa_handover);
 	if (ret)
 		goto detach_proxy_pds;
 
